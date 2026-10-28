@@ -11,36 +11,29 @@ import { fetchRoute, reverseGeocode } from '../lib/geo.js'
 import { estimateFares } from '../lib/fares.js'
 import { speak } from '../lib/speech.js'
 
-/**
- * The map-first booking screen.
- * Flow: GPS pickup → destination (typed or spoken) → real route →
- * fares → one tap to book → trip page. Nothing is faked.
- */
+// IMPORTANT: these ids must match what estimateFares() returns in lib/fares.js
+const VEHICLES = [
+  { id: 'auto', name: 'Auto rickshaw', blurb: 'Best for short city hops' },
+  { id: 'car',  name: 'Car',          blurb: 'Comfortable, door-to-door' },
+  { id: 'bike', name: 'Bike',         blurb: 'Fastest through traffic' },
+]
+
 export default function BookingPage() {
   const navigate = useNavigate()
   const { lang, setLang } = useApp()
 
-// Location state — { lat, lng, label, address } or null
-  const [pickup, setPickup] = useState(null)
+const [pickup, setPickup] = useState(null)
   const [dest, setDest] = useState(null)
-
-// Route + fares
-  const [route, setRoute] = useState(null)      // { coords, distanceKm, drivingMin }
+  const [route, setRoute] = useState(null)
   const [routeBusy, setRouteBusy] = useState(false)
   const [routeError, setRouteError] = useState(null)
-
-// Vehicle + booking
   const [vehicle, setVehicle] = useState('auto')
   const [bookingBusy, setBookingBusy] = useState(false)
   const [msg, setMsg] = useState(null)
-
-// Voice → destination wiring
   const [voiceQuery, setVoiceQuery] = useState('')
-
-// GPS status banner
   const [gpsMsg, setGpsMsg] = useState('Finding your GPS location…')
 
-/* ---------- 1. Real GPS pickup on load ---------- */
+/* 1. Real GPS pickup on load — unchanged */
   useEffect(() => {
     if (!navigator.geolocation) {
       setGpsMsg('Location is not supported on this device. Search for your pickup point below.')
@@ -62,7 +55,7 @@ export default function BookingPage() {
     )
   }, [])
 
-/* ---------- 2. Real route when both points exist ---------- */
+/* 2. Real route when both points exist — unchanged */
   useEffect(() => {
     if (!pickup || !dest) { setRoute(null); setRouteError(null); return }
     let dead = false
@@ -78,7 +71,7 @@ export default function BookingPage() {
 const fares = route ? estimateFares(route.distanceKm) : null
   const selectedFare = fares?.find((f) => f.id === vehicle) || null
 
-/* ---------- 3. Spoken fare + ETA once the route is real ---------- */
+/* 3. Spoken fare + ETA — unchanged */
   useEffect(() => {
     if (route && selectedFare && lang) {
       speak(
@@ -91,16 +84,14 @@ const fares = route ? estimateFares(route.distanceKm) : null
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route])
 
-/* ---------- 4. Book — one real POST, then the trip page ---------- */
+/* 4. Book — unchanged */
   const book = async () => {
     if (!pickup || !dest || !route || !selectedFare || bookingBusy) return
     setBookingBusy(true)
     setMsg(null)
     try {
       const trip = await api.createBooking({
-        pickup,
-        dest,
-        vehicle,
+        pickup, dest, vehicle,
         fare: selectedFare.fare,
         distanceKm: route.distanceKm,
         etaMin: selectedFare.etaMin,
@@ -114,8 +105,7 @@ const fares = route ? estimateFares(route.distanceKm) : null
   }
 
 const canBook = !!(pickup && dest && route && selectedFare && !routeBusy)
-
-const ctaLabel = !dest
+  const ctaLabel = !dest
     ? 'SET DESTINATION'
     : routeBusy
       ? 'FINDING ROUTE…'
@@ -123,16 +113,22 @@ const ctaLabel = !dest
         ? `BOOK ${selectedFare.name.toUpperCase()} · ₹${selectedFare.fare}`
         : 'CHOOSE A DESTINATION'
 
-return (
-    <div className="aero-shell">
-      {/* ---------- Map ---------- */}
-      <MapCanvas pickup={pickup} dest={dest} routeCoords={route?.coords} />
+/* NEW: map only exists once a destination is chosen */
+  const showMap = !!(pickup && dest)
 
-{/* ---------- Booking panel ---------- */}
-      <BookingPanel tab="book">
+return (
+    <div className={`aero-shell${showMap ? ' is-routing' : ' is-search'}`}>
+
+{showMap && (
+        <MapCanvas pickup={pickup} dest={dest} routeCoords={route?.coords} />
+      )}
+
+<BookingPanel tab="book">
         <p className="display">Where to?</p>
 
-{gpsMsg && <p className="msg">{gpsMsg}</p>}
+<div aria-live="polite">
+          {gpsMsg && <p className="msg">{gpsMsg}</p>}
+        </div>
 
 <div className="loc-group">
           <LocationField
@@ -165,8 +161,28 @@ return (
         )}
         {routeError && <p className="msg error">{routeError}</p>}
 
-{fares && (
+{/* NEW: all vehicles, always visible.
+            Before the route exists → preview cards (selectable, no fares yet).
+            Once fares are computed → your real VehiclePicker with live prices. */}
+        {fares ? (
           <VehiclePicker options={fares} selected={vehicle} onSelect={setVehicle} />
+        ) : (
+          <div className="vehicle-preview" aria-label="Choose a vehicle type">
+            {VEHICLES.map((v) => (
+              <button
+                key={v.id}
+                type="button"
+                className={`vehicle-chip${vehicle === v.id ? ' is-active' : ''}`}
+                onClick={() => setVehicle(v.id)}
+              >
+                <span className="vehicle-chip-name">{v.name}</span>
+                <span className="vehicle-chip-blurb">{v.blurb}</span>
+                <span className="vehicle-chip-fare">
+                  {routeBusy ? 'Calculating fare…' : 'Fare appears once route is set'}
+                </span>
+              </button>
+            ))}
+          </div>
         )}
 
 {msg && <p className="msg error">{msg}</p>}

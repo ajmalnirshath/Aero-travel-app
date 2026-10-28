@@ -1,168 +1,183 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import BookingPanel from '../components/BookingPanel.jsx'
 import MapCanvas from '../components/MapCanvas.jsx'
 import LocationField from '../components/LocationField.jsx'
-import VehiclePicker from '../components/VehiclePicker.jsx'
 import VoiceAssistant from '../components/VoiceAssistant.jsx'
+import VehiclePicker from '../components/VehiclePicker.jsx'
 import { useApp } from '../context/AppContext.jsx'
-import { fetchRoute, reverseGeocode } from '../lib/geo.js'
-import { VEHICLES, estimateFare, estimateEtaMin, rupees } from '../lib/fares.js'
 import { api } from '../lib/api.js'
+import { fetchRoute, reverseGeocode } from '../lib/geo.js'
+import { estimateFares } from '../lib/fares.js'
 import { speak } from '../lib/speech.js'
 
+/**
+ * The map-first booking screen.
+ * Flow: GPS pickup → destination (typed or spoken) → real route →
+ * fares → one tap to book → trip page. Nothing is faked.
+ */
 export default function BookingPage() {
-  const { lang, pendingDest, setPendingDest } = useApp()
   const navigate = useNavigate()
+  const { lang, setLang } = useApp()
 
-const [pickup, setPickup] = useState(null)
+// Location state — { lat, lng, label, address } or null
+  const [pickup, setPickup] = useState(null)
   const [dest, setDest] = useState(null)
-  const [route, setRoute] = useState(null)
-  const [vehicle, setVehicle] = useState('auto')
-  const [geoError, setGeoError] = useState(null)
-  const [routeError, setRouteError] = useState(null)
-  const [booking, setBooking] = useState(false)
-  const [bookError, setBookError] = useState(null)
 
-// Real GPS pickup (no faking — permission denial is shown honestly)
+// Route + fares
+  const [route, setRoute] = useState(null)      // { coords, distanceKm, drivingMin }
+  const [routeBusy, setRouteBusy] = useState(false)
+  const [routeError, setRouteError] = useState(null)
+
+// Vehicle + booking
+  const [vehicle, setVehicle] = useState('auto')
+  const [bookingBusy, setBookingBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+
+// Voice → destination wiring
+  const [voiceQuery, setVoiceQuery] = useState('')
+
+// GPS status banner
+  const [gpsMsg, setGpsMsg] = useState('Finding your GPS location…')
+
+/* ---------- 1. Real GPS pickup on load ---------- */
   useEffect(() => {
-    if (!navigator.geolocation) return setGeoError('This browser does not support GPS.')
+    if (!navigator.geolocation) {
+      setGpsMsg('Location is not supported on this device. Search for your pickup point below.')
+      return
+    }
     navigator.geolocation.getCurrentPosition(
       async ({ coords }) => {
-        setPickup({ lat: coords.latitude, lng: coords.longitude, label: 'Locating…' })
+        const p = { lat: coords.latitude, lng: coords.longitude }
         try {
-          const { label, address } = await reverseGeocode(coords.latitude, coords.longitude)
-          setPickup({ lat: coords.latitude, lng: coords.longitude, label, address })
+          const named = await reverseGeocode(p.lat, p.lng)
+          setPickup({ ...p, label: named.label, address: named.address })
         } catch {
-          setPickup({ lat: coords.latitude, lng: coords.longitude, label: 'Current location' })
+          setPickup({ ...p, label: 'Current GPS location', address: '' })
         }
+        setGpsMsg(null)
       },
-      (err) =>
-        setGeoError(
-          err.code === err.PERMISSION_DENIED
-            ? 'Location is off. Allow location access, or search for your pickup point below.'
-            : 'Could not get your location. Please search for your pickup point below.'
-        ),
+      () => setGpsMsg('Location is off. Allow location access, or search for your pickup point below.'),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
     )
   }, [])
 
-// Saved Places → "Use" flows here
+/* ---------- 2. Real route when both points exist ---------- */
   useEffect(() => {
-    if (pendingDest) {
-      setDest(pendingDest)
-      setPendingDest(null)
-    }
-  }, [pendingDest, setPendingDest])
-
-// Real OSRM route whenever both points exist
-  useEffect(() => {
-    let cancelled = false
-    if (!pickup?.lat || !dest?.lat) { setRoute(null); setRouteError(null); return }
-    setRoute(null)
+    if (!pickup || !dest) { setRoute(null); setRouteError(null); return }
+    let dead = false
+    setRouteBusy(true)
     setRouteError(null)
     fetchRoute(pickup, dest)
-      .then((r) => !cancelled && setRoute(r))
-      .catch((e) => !cancelled && setRouteError(e.message))
-    return () => { cancelled = true }
-  }, [pickup?.lat, pickup?.lng, dest?.lat, dest?.lng])
+      .then((r) => { if (!dead) setRoute(r) })
+      .catch((e) => { if (!dead) setRouteError(e.message || 'No road route found.') })
+      .finally(() => { if (!dead) setRouteBusy(false) })
+    return () => { dead = true }
+  }, [pickup, dest])
 
-const fares = useMemo(() => {
-    const out = {}
-    for (const v of VEHICLES) out[v.id] = route ? estimateFare(v.id, route.distanceKm) : null
-    return out
+const fares = route ? estimateFares(route.distanceKm) : null
+  const selectedFare = fares?.find((f) => f.id === vehicle) || null
+
+/* ---------- 3. Spoken fare + ETA once the route is real ---------- */
+  useEffect(() => {
+    if (route && selectedFare && lang) {
+      speak(
+        lang === 'ta-IN'
+          ? `கார் தூரம் ${route.distanceKm} கிலோமீட்டர். கட்டணம் சுமார் ${selectedFare.fare} ரூபாய்.`
+          : `Route is ${route.distanceKm} kilometres. The ${selectedFare.name.toLowerCase()} fare is about ${selectedFare.fare} rupees.`,
+        lang
+      )
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route])
 
-const etas = useMemo(() => {
-    const out = {}
-    for (const v of VEHICLES)
-      out[v.id] = route ? estimateEtaMin(v.id, route.distanceKm, route.drivingMin) : null
-    return out
-  }, [route])
-
-const canBook = Boolean(pickup?.lat && dest?.lat && route && !booking)
-
-const confirmBooking = async () => {
-    if (!canBook) return
-    setBooking(true)
-    setBookError(null)
+/* ---------- 4. Book — one real POST, then the trip page ---------- */
+  const book = async () => {
+    if (!pickup || !dest || !route || !selectedFare || bookingBusy) return
+    setBookingBusy(true)
+    setMsg(null)
     try {
-      const b = await api.createBooking({
+      const trip = await api.createBooking({
+        pickup,
+        dest,
         vehicle,
-        pickupLabel: pickup.label,
-        pickupLat: pickup.lat, pickupLng: pickup.lng,
-        destLabel: dest.label,
-        destLat: dest.lat, destLng: dest.lng,
+        fare: selectedFare.fare,
         distanceKm: route.distanceKm,
-        durationMin: etas[vehicle],
-        fare: fares[vehicle],
+        etaMin: selectedFare.etaMin,
       })
-      navigate(`/trip/${b.id}`)
+      navigate(`/trip/${trip.id}`)
     } catch (e) {
-      setBookError(e.message)
-      setBooking(false)
+      setMsg(e?.message || 'Booking failed. Please try again.')
+    } finally {
+      setBookingBusy(false)
     }
   }
 
-// Spoken summary — used by the voice assistant before explicit confirmation
-  const confirmPrompt = (place) =>
-    `Trip to ${place.label}. The fare is about ${rupees(fares[vehicle] ?? estimateFare(vehicle, route?.distanceKm ?? 0))} ` +
-    `and it takes about ${etas[vehicle] ?? 'a few'} minutes. Say confirm to book.`
+const canBook = !!(pickup && dest && route && selectedFare && !routeBusy)
 
-const hour = new Date().getHours()
-  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
+const ctaLabel = !dest
+    ? 'SET DESTINATION'
+    : routeBusy
+      ? 'FINDING ROUTE…'
+      : canBook
+        ? `BOOK ${selectedFare.name.toUpperCase()} · ₹${selectedFare.fare}`
+        : 'CHOOSE A DESTINATION'
 
 return (
     <div className="aero-shell">
+      {/* ---------- Map ---------- */}
       <MapCanvas pickup={pickup} dest={dest} routeCoords={route?.coords} />
-      <BookingPanel>
-        <div>
-          <p className="eyebrow">{greeting}</p>
-          <h1 className="display">Where to?</h1>
-        </div>
+
+{/* ---------- Booking panel ---------- */}
+      <BookingPanel tab="book">
+        <p className="display">Where to?</p>
+
+{gpsMsg && <p className="msg">{gpsMsg}</p>}
 
 <div className="loc-group">
           <LocationField
-            id="pickup" label="Pickup point" placeholder="Pickup — using GPS, or search"
-            value={pickup} onPick={setPickup} near={pickup || dest}
+            id="pickup-search"
+            label="Pickup — using GPS, or search"
+            placeholder="Pickup — using GPS, or search"
+            value={pickup}
+            onPick={(p) => setPickup(p)}
+            near={pickup}
           />
           <LocationField
-            id="dest" label="Where to?" placeholder="Search destination"
-            value={dest} onPick={setDest} near={pickup} iconClass="is-dest"
+            id="dest-search"
+            label="Search destination"
+            placeholder="Search destination"
+            value={dest}
+            onPick={setDest}
+            near={pickup}
+            iconClass="is-dest"
+            seedText={voiceQuery}
           />
         </div>
 
-{geoError && <p className="msg" role="status">{geoError}</p>}
-        {routeError && <p className="msg error" role="alert">{routeError}</p>}
+{route && (
+          <p className="route-line">
+            <span className="num">{route.distanceKm} km</span>
+            <span>·</span>
+            <span className="num">{route.drivingMin} min</span>
+            <span>by road</span>
+          </p>
+        )}
+        {routeError && <p className="msg error">{routeError}</p>}
 
-<VehiclePicker value={vehicle} onChange={setVehicle} distanceKm={route?.distanceKm} fares={fares} etas={etas} />
+{fares && (
+          <VehiclePicker options={fares} selected={vehicle} onSelect={setVehicle} />
+        )}
 
-<p className="route-line" aria-live="polite">
-          {route ? (
-            <>
-              <span><span className="num">{route.distanceKm}</span> km</span>
-              <span aria-hidden="true">·</span>
-              <span><span className="num">{etas[vehicle]}</span> min est.</span>
-            </>
-          ) : (
-            'Fare appears once a route is found.'
-          )}
-        </p>
+{msg && <p className="msg error">{msg}</p>}
 
-<VoiceAssistant
-          onDestination={setDest}
-          onConfirm={confirmBooking}
-          confirmPrompt={confirmPrompt}
-          canConfirm={canBook}
-        />
-
-{bookError && <p className="msg error" role="alert">{bookError}</p>}
-
-<button type="button" className="cta" disabled={!canBook} onClick={confirmBooking}>
-          {booking ? 'Booking…' : route ? `Book ${rupees(fares[vehicle])}` : 'Set destination'}
+<button type="button" className="cta" onClick={book} disabled={!canBook || bookingBusy}>
+          {bookingBusy ? 'BOOKING…' : ctaLabel}
         </button>
 
-<p className="voice-status">
+<VoiceAssistant lang={lang} setLang={setLang} onTranscript={setVoiceQuery} />
+
+<p className="eyebrow">
           Fare and time are estimates. AERO shows real routes from OpenStreetMap.
         </p>
       </BookingPanel>

@@ -2,15 +2,23 @@ import { useEffect, useRef, useState } from 'react'
 import { searchPlaces } from '../lib/geo.js'
 
 /**
- * Real Nominatim autocomplete. Debounced 500ms (service limit ~1 req/sec),
- * stale requests aborted. Touch targets ≥48px.
+ * seedText: text injected from voice input. When it changes, the field
+ * clears any previous pick and fills the box, which triggers autocomplete.
  */
-export default function LocationField({ id, label, placeholder, value, onPick, near, iconClass }) {
+export default function LocationField({ id, label, placeholder, value, onPick, near, iconClass, seedText }) {
   const [text, setText] = useState('')
-  const [results, setResults] = useState(null) // null = closed, [] = no matches
+  const [results, setResults] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const abortRef = useRef(null)
+
+// Voice injection: external text becomes the field content
+  useEffect(() => {
+    if (seedText && seedText.trim()) {
+      if (value) onPick(null)
+      setText(seedText.trim())
+    }
+  }, [seedText])
 
 useEffect(() => {
     if (!text.trim() || text.trim().length < 3 || value?.label === text) {
@@ -37,7 +45,7 @@ useEffect(() => {
   }, [text, near, value?.label])
 
 return (
-    <div className={`loc-field ${iconClass}`}>
+    <div className={`loc-field ${iconClass || ''}`}>
       <label htmlFor={id} className="sr-only">{label}</label>
       <span className="loc-track" aria-hidden="true" />
       <input
@@ -45,12 +53,18 @@ return (
         className="loc-input"
         type="text"
         autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck="false"
+        inputMode="search"
+        enterKeyHint="search"
         placeholder={placeholder}
         value={value?.label ?? text}
         onChange={(e) => {
-          if (value) onPick(null) // typing clears a previously picked point
+          if (value) onPick(null)
           setText(e.target.value)
         }}
+        onBlur={() => setTimeout(() => setResults(null), 180)}
         aria-describedby={results ? `${id}-results` : undefined}
       />
       {value && (
@@ -71,7 +85,7 @@ return (
               key={`${r.lat},${r.lng}`}
               type="button"
               className="loc-result"
-              onClick={() => { onPick(r); setResults(null); setText('') }}
+              onPointerDown={() => { onPick(r); setResults(null); setText('') }}
             >
               <span className="r-main">{r.label}</span>
               <span className="r-sub">{r.address}</span>

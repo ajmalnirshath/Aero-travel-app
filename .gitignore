@@ -1,1 +1,32 @@
-node_modules dist .env data
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment / secrets
+.env
+.env.*
+
+# Local database
+data/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS junk (Windows)
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor junk
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# Vercel
+.vercel/
+node_modules
